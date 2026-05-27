@@ -51,8 +51,7 @@ class InvestmentAnalysisWorkflow:
         self.summary_report_generator = SummaryReportGenerator(chat_client=self.chat_client, prompt_retriever=self.get_prompt_template)
         
         self.workflow  = (
-            WorkflowBuilder()
-            .set_start_executor(self.data_prep_executor)
+            WorkflowBuilder(start_executor=self.data_prep_executor)
             .add_fan_out_edges(self.data_prep_executor, [self.financial_analyst, self.risk_analyst, self.market_analyst, self.compliance_analyst])
             .add_fan_in_edges([self.financial_analyst, self.risk_analyst, self.market_analyst, self.compliance_analyst], self.analysis_aggregator)
             .add_edge(self.analysis_aggregator, self.debate_executor)

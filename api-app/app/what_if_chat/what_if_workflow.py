@@ -40,8 +40,7 @@ class WhatIfChatWorkflow:
         summarizer_agent = AnalysisSummarizer(expert_ids=[financial_analyst_agent.id, risk_analyst_agent.id, market_analyst_agent.id, compliance_analyst_agent.id], chat_client=self.chat_client)
         
         self.workflow  = (
-            WorkflowBuilder()
-            .set_start_executor(planner_agent)
+            WorkflowBuilder(start_executor=planner_agent)
             .add_fan_out_edges(planner_agent, [financial_analyst_agent, risk_analyst_agent, market_analyst_agent, compliance_analyst_agent])
             .add_fan_in_edges([financial_analyst_agent, risk_analyst_agent, market_analyst_agent, compliance_analyst_agent], summarizer_agent)
             .build()
