@@ -3,8 +3,8 @@ from typing import Never, Optional
 from abc import ABC, abstractmethod
 from pydantic import BaseModel, Field
 
-from agent_framework import AgentRunResponse, BaseChatClient, Executor, Workflow, WorkflowBuilder, WorkflowContext, handler, ChatAgent
-from agent_framework.azure import AzureOpenAIChatClient
+from agent_framework import AgentResponse, BaseChatClient, Executor, Workflow, WorkflowBuilder, WorkflowContext, handler, Agent
+from agent_framework.openai import OpenAIChatClient
 
 ########################
 # Data Models

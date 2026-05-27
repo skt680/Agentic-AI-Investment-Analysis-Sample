@@ -2,7 +2,7 @@
 from abc import ABC, abstractmethod
 from typing import Any
 
-from agent_framework import WorkflowOutputEvent
+from agent_framework import WorkflowEvent
 
 
 class WorkflowEventAdapter(ABC):

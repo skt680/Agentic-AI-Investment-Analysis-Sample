@@ -6,15 +6,8 @@ import traceback
 from typing import TYPE_CHECKING
 import logging
 
-from agent_framework import (ExecutorInvokedEvent, 
-                             ExecutorCompletedEvent, 
-                             ExecutorFailedEvent, 
-                             WorkflowEvent, 
-                             WorkflowStartedEvent, 
-                             WorkflowRunState, 
-                             WorkflowFailedEvent, 
-                             WorkflowOutputEvent, 
-                             WorkflowStatusEvent)
+from agent_framework import (WorkflowEvent, 
+                             WorkflowRunState)
 
 from app.utils.sse_stream_event_queue import SSEStreamEventQueue
 from app.dependencies import get_chat_client
@@ -61,42 +54,42 @@ class AnalysisWorkflowExecutorService:
         data = {}
         message = None
         
-        if isinstance(event, WorkflowStartedEvent):
+        if event.type == "started":
             event_type = "workflow_started"
             message = "Workflow execution started"
-        elif isinstance(event, WorkflowFailedEvent):
+        elif event.type == "failed":
             event_type = "workflow_failed"
             message = "Workflow execution failed"
-            executor = event.details.executor_id
+            executor = event.details.executor_id if event.details else None
             data = {"error": event.details.message, 
                     "error_type": event.details.error_type,
                     "traceback": event.details.traceback,
                     "extra": event.details.extra
-                    }
+                    } if event.details else {}
             # fail the analysis in the database
             await self.analysis_service.fail_analysis(analysis_id=analysis_id, opportunity_id=opportunity_id, error_details=data)
 
-        elif isinstance(event, WorkflowStatusEvent):
+        elif event.type == "status":
             event_type = "workflow_status"
-            data = {"state": event.state.value}
+            data = {"state": event.state.value if hasattr(event.state, 'value') else str(event.state)}
             
             # update analysis status if completed
             if event.state == WorkflowRunState.IDLE:
                 # IDLE indicates completed
                 await self.analysis_service.complete_analysis(analysis_id=analysis_id, opportunity_id=opportunity_id)
                 
-        elif isinstance(event, ExecutorInvokedEvent):
+        elif event.type == "executor_invoked":
             event_type = "executor_invoked"
             executor = event.executor_id
-        elif isinstance(event, ExecutorCompletedEvent):
+        elif event.type == "executor_completed":
             event_type = "executor_completed"
             executor = event.executor_id
             data = event.data or {}
-        elif isinstance(event, WorkflowOutputEvent):
+        elif event.type == "output":
             event_type = "workflow_output"
-            executor = event.source_executor_id
+            executor = event.executor_id
             data = event.data or {}
-        elif isinstance(event, ExecutorFailedEvent):
+        elif event.type == "executor_failed":
             event_type = "executor_failed"
             executor = event.executor_id
             data = {
@@ -104,7 +97,7 @@ class AnalysisWorkflowExecutorService:
                 "error_type": event.details.error_type,
                 "traceback": event.details.traceback,
                 "extra": event.details.extra
-            }
+            } if event.details else {}
         else:
             event_type = "unknown_event"
             
@@ -123,7 +116,7 @@ class AnalysisWorkflowExecutorService:
                                                  event_message=event_message)
         
         # save the output
-        if isinstance(event, WorkflowOutputEvent):
+        if event.type == "output":
             await self.analysis_service.save_agent_result(
                     analysis_id=analysis_id,
                     opportunity_id=opportunity_id,

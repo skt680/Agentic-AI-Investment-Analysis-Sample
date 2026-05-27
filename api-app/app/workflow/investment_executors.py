@@ -2,8 +2,8 @@ import logging
 from typing import Never, Optional
 from abc import ABC, abstractmethod
 
-from agent_framework import AgentRunEvent, AgentRunResponse, Executor, GroupChatBuilder, WorkflowContext, handler, ChatAgent
-from agent_framework.azure import AzureOpenAIChatClient
+from agent_framework import AgentResponse, Executor, WorkflowContext, WorkflowEvent, Workflow, WorkflowBuilder, handler, Agent, Message
+from agent_framework.openai import OpenAIChatClient, OpenAIChatOptions
 
 from .investment_models import (
     AnalysisResult,
@@ -20,7 +20,7 @@ logger = logging.getLogger("app.workflow.investment_executors")
 ########################
 
 class DataPreparationExecutor(Executor):
-    def __init__(self, chat_client: AzureOpenAIChatClient, id: str = "data_prepper"):
+    def __init__(self, chat_client: OpenAIChatClient, id: str = "data_prepper"):
         self._chat_client = chat_client
         
         super().__init__(id=id)
@@ -68,14 +68,14 @@ class DataPreparationExecutor(Executor):
 class BaseAnalyst(Executor, ABC):
     """Base class for different types of investment analysts (financial, risk, market, compliance)."""
     
-    def __init__(self, chat_client: AzureOpenAIChatClient, id: str, prompt_retriever: callable = None):
+    def __init__(self, chat_client: OpenAIChatClient, id: str, prompt_retriever: callable = None):
         self.chat_client = chat_client
         self._prompt_retriever_callable = prompt_retriever
         super().__init__(id=id)
         
-    def create_agent(self, instructions: str) -> ChatAgent:
-        agent = ChatAgent(
-            chat_client=self.chat_client,
+    def create_agent(self, instructions: str) -> Agent:
+        agent = Agent(
+            client=self.chat_client,
             instructions=instructions,
             id=self.id,
             name=self.id
@@ -128,12 +128,22 @@ class BaseAnalyst(Executor, ABC):
             f"### INSTRUCTIONS ### \n\n{prompt_template}"
         )
         _agent = self.create_agent(instructions=_agent_instructions)
-        _response: AgentRunResponse = await _agent.run(analysis_data.analysis_run_input.hypothesis, stream=False, response_format=AnalystResultResponseModel)
+        _response: AgentResponse = await _agent.run(
+            analysis_data.analysis_run_input.hypothesis,
+            stream=False,
+            options=OpenAIChatOptions(response_format={"type": "json_object"})
+        )
+        # Parse structured response
+        import json
+        try:
+            _parsed = AnalystResultResponseModel.model_validate_json(_response.text)
+        except Exception:
+            _parsed = AnalystResultResponseModel(executive_summary=_response.text)
 
         analyst_response = AnalystResult(
             analysis_run_input=analysis_data.analysis_run_input,
             author_analyst_id=self.id,
-            analyst_result=_response.value,
+            analyst_result=_parsed,
         )
         
         # Forward the accumulated messages to the next executor in the workflow.
@@ -147,7 +157,7 @@ class BaseAnalyst(Executor, ABC):
 class FinancialAnalyst(BaseAnalyst):
     """Financial analyst specialized in analyzing financial data."""
     
-    def __init__(self, chat_client: AzureOpenAIChatClient, id: str = "financial_analyst", prompt_retriever: callable = None):
+    def __init__(self, chat_client: OpenAIChatClient, id: str = "financial_analyst", prompt_retriever: callable = None):
         super().__init__(chat_client=chat_client, id=id, prompt_retriever=prompt_retriever)
     
     def get_summary_data(self, analysis_data: AnalysisData) -> str:
@@ -158,7 +168,7 @@ class FinancialAnalyst(BaseAnalyst):
 class RiskAnalyst(BaseAnalyst):
     """Risk analyst specialized in analyzing risk data."""
     
-    def __init__(self, chat_client: AzureOpenAIChatClient, id: str = "risk_analyst", prompt_retriever: callable = None):
+    def __init__(self, chat_client: OpenAIChatClient, id: str = "risk_analyst", prompt_retriever: callable = None):
         super().__init__(chat_client=chat_client, id=id, prompt_retriever=prompt_retriever)
     
     def get_summary_data(self, analysis_data: AnalysisData) -> str:
@@ -169,7 +179,7 @@ class RiskAnalyst(BaseAnalyst):
 class MarketAnalyst(BaseAnalyst):
     """Market analyst specialized in analyzing market data."""
     
-    def __init__(self, chat_client: AzureOpenAIChatClient, id: str = "market_analyst", prompt_retriever: callable = None):
+    def __init__(self, chat_client: OpenAIChatClient, id: str = "market_analyst", prompt_retriever: callable = None):
         super().__init__(chat_client=chat_client, id=id, prompt_retriever=prompt_retriever)
     
     def get_summary_data(self, analysis_data: AnalysisData) -> str:
@@ -180,7 +190,7 @@ class MarketAnalyst(BaseAnalyst):
 class ComplianceAnalyst(BaseAnalyst):
     """Compliance analyst specialized in analyzing compliance data."""
 
-    def __init__(self, chat_client: AzureOpenAIChatClient, id: str = "compliance_analyst", prompt_retriever: callable = None):
+    def __init__(self, chat_client: OpenAIChatClient, id: str = "compliance_analyst", prompt_retriever: callable = None):
         super().__init__(chat_client=chat_client, id=id, prompt_retriever=prompt_retriever)
     
     def get_summary_data(self, analysis_data: AnalysisData) -> str:
@@ -218,14 +228,14 @@ class InvestmentDebateWorkflowExecutor(Executor):
         Only finish the debate when you believe both sides have sufficiently explored the topic."""
     
 
-    def __init__(self, chat_client: AzureOpenAIChatClient, id: str = "investment_debate_executor", prompt_retriever: callable = None):
+    def __init__(self, chat_client: OpenAIChatClient, id: str = "investment_debate_executor", prompt_retriever: callable = None):
         self.chat_client = chat_client
         self._prompt_retriever_callable = prompt_retriever
         
         super().__init__(id=id)
 
 
-    def create_agent(self, agent_id: str, aggregated_analysis: list[AnalystResult]) -> ChatAgent:
+    def create_agent(self, agent_id: str, aggregated_analysis: list[AnalystResult]) -> Agent:
         _prompt = self._prompt_retriever_callable(agent_id) if self._prompt_retriever_callable else ""
                 
         _agent_instructions = (
@@ -242,8 +252,8 @@ class InvestmentDebateWorkflowExecutor(Executor):
             + _prompt
         )
         
-        agent = ChatAgent(
-            chat_client=self.chat_client,
+        agent = Agent(
+            client=self.chat_client,
             instructions=_agent_instructions,
             description=(agent_id == "investment_supporter" and "An agent that supports the investment hypothesis." or "An agent that challenges the investment hypothesis."),
             id=agent_id,
@@ -260,36 +270,34 @@ class InvestmentDebateWorkflowExecutor(Executor):
             ctx (WorkflowContext): Context for the workflow execution
         """
 
-        # Build GroupChat Workflow of the supported and challenger agents
+        # Build a simple multi-turn debate between supporter and challenger agents
         supporter_agent = self.create_agent("investment_supporter", aggregated_analysis)
         challenger_agent = self.create_agent("investment_challenger", aggregated_analysis)
         
-        workflow = (
-            GroupChatBuilder()
-            .set_prompt_based_manager(chat_client=self.chat_client, instructions=InvestmentDebateWorkflowExecutor.GROUP_CHAT_MANAGER_INSTRUCTIONS, display_name="Coordinator")
-            .participants([supporter_agent, challenger_agent])
-            .with_max_rounds(4)
-            .build()
-        )
-       
-        result = await workflow.run(
-            message=aggregated_analysis[0].analysis_run_input.hypothesis
-        )
-
-        # extract the last AgentRunEvent for each agent to get their final output
-        # result is a list of events, some of which are AgentRunEvent types
-        # we need to filter and get the last message from each agent
-        supporter_output = None
-        challenger_output = None
+        hypothesis = aggregated_analysis[0].analysis_run_input.hypothesis
         
-        for event in reversed(result):
-            if isinstance(event, AgentRunEvent):
-                if event.executor_id.endswith("investment_supporter") and supporter_output is None:
-                    supporter_output = str(event.data)
-                elif event.executor_id.endswith("investment_challenger") and challenger_output is None:
-                    challenger_output = str(event.data)
-            if supporter_output and challenger_output:
-                break
+        # Round 1: Initial arguments
+        supporter_response = await supporter_agent.run(hypothesis, stream=False)
+        supporter_output = supporter_response.text
+        
+        challenger_response = await challenger_agent.run(
+            f"{hypothesis}\n\nSupporter's argument:\n{supporter_output}",
+            stream=False
+        )
+        challenger_output = challenger_response.text
+        
+        # Round 2: Rebuttals
+        supporter_response = await supporter_agent.run(
+            f"Respond to the challenger's argument:\n{challenger_output}",
+            stream=False
+        )
+        supporter_output = supporter_response.text
+        
+        challenger_response = await challenger_agent.run(
+            f"Respond to the supporter's argument:\n{supporter_output}",
+            stream=False
+        )
+        challenger_output = challenger_response.text
         
         final_analysis_result = AnalysisResult(
             analysis_run_input=aggregated_analysis[0].analysis_run_input,
@@ -314,13 +322,13 @@ class InvestmentDebateWorkflowExecutor(Executor):
 class SummaryReportGenerator(Executor):
     """Generates a final summary report based on the debate outcome and analysis data."""
 
-    def __init__(self, chat_client: AzureOpenAIChatClient, id: str = "summary_report_generator", prompt_retriever: callable = None):
+    def __init__(self, chat_client: OpenAIChatClient, id: str = "summary_report_generator", prompt_retriever: callable = None):
         self.chat_client = chat_client
         self._prompt_retriever_callable = prompt_retriever
         
         super().__init__(id=id)
 
-    def create_agent(self, analysisResult: AnalysisResult) -> ChatAgent:
+    def create_agent(self, analysisResult: AnalysisResult) -> Agent:
         _prompt = self._prompt_retriever_callable(self.id) if self._prompt_retriever_callable else ""
                 
         _agent_instructions = (
@@ -346,8 +354,8 @@ class SummaryReportGenerator(Executor):
             + _prompt
         )
         
-        agent = ChatAgent(
-            chat_client=self.chat_client,
+        agent = Agent(
+            client=self.chat_client,
             instructions=_agent_instructions,
             id=self.id,
             name=self.id
@@ -365,9 +373,7 @@ class SummaryReportGenerator(Executor):
         _agent = self.create_agent(analysisResult=analysisResult)
         _response = await _agent.run(analysisResult.analysis_run_input.hypothesis, stream=False)
 
-        # logger.debug(f"{self.id} agent run completed. Response: {_response.to_dict()}")
-
-        _response_text = "\n".join([m.text for m in _response.messages])
+        _response_text = _response.text
 
         # Update the analysisResult with the summary report
         analysisResult.summary_report = _response_text

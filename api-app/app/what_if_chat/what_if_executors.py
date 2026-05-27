@@ -5,9 +5,9 @@ from collections.abc import Collection
 from typing import Any, Never
 import uuid
 
-from agent_framework import AgentRunResponse, AgentRunResponseUpdate, AgentThread, ChatMessage, ChatMessageStoreProtocol, Executor, WorkflowContext, handler
-from agent_framework._threads import ChatMessageStoreState
-from agent_framework import BaseChatClient, ChatAgent, Workflow, WorkflowBuilder
+from agent_framework import AgentResponse, AgentResponseUpdate, AgentSession, Message, Executor, WorkflowContext, handler
+from agent_framework import BaseChatClient, Agent, Workflow, WorkflowBuilder
+from agent_framework.openai import OpenAIChatOptions
 
 from app.database.repositories import WhatIfMessageRepository
 from app.models import WhatIfMessage, Analysis
@@ -40,7 +40,7 @@ class ConversationHistoryRetriever(Executor):
                 history_messages = sorted(history_messages, key=lambda msg: msg.sequence_number)
                 ctx.set_shared_state(key="conversation_context", state=ConversationContext(
                     conversation_id=input.conversation_id,
-                    message_history=[ChatMessage(role=msg.role, text=msg.text, author_name=msg.author) for msg in history_messages]
+                    message_history=[Message(role=msg.role, contents=[msg.text], author_name=msg.author) for msg in history_messages]
                 ))
         
         await ctx.send_message(input)
@@ -59,10 +59,10 @@ class PlanningAgentExecutor(Executor):
         
         super().__init__(id=id)
     
-    async def create_agent(self, id: str, instructions: str) -> ChatAgent:
-        """Create and return a ChatAgent configured for the What-If Chat workflow"""
-        agent = ChatAgent(
-            chat_client=self.chat_client,
+    async def create_agent(self, id: str, instructions: str) -> Agent:
+        """Create and return an Agent configured for the What-If Chat workflow"""
+        agent = Agent(
+            client=self.chat_client,
             instructions=instructions,
             id=id,
             name=id
@@ -77,13 +77,12 @@ class PlanningAgentExecutor(Executor):
         
         await ctx.set_shared_state(key="conversation_context", value=conversation_context)
     
-    async def create_thread_from_context(self, agent: ChatAgent, conversation_context: ConversationContext) -> AgentThread:
-        """Create an AgentThread from the workflow context"""
-        thread = agent.get_new_thread()
+    def _build_messages_from_context(self, conversation_context: ConversationContext) -> list[Message]:
+        """Build a list of Messages from the conversation context"""
+        messages = []
         if conversation_context is not None and conversation_context.message_history is not None:
-            for msg in conversation_context.message_history:
-                await thread.on_new_messages(msg)
-        return thread
+            messages.extend(conversation_context.message_history)
+        return messages
     
     @handler
     async def handle(self, input: WhatIfChatWorkflowInputData, ctx: WorkflowContext[ExecutionPlan, PlanningAgentResponseModel]) -> Any:
@@ -141,17 +140,31 @@ class PlanningAgentExecutor(Executor):
             """
         )
                 
-        _thread = await self.create_thread_from_context(_agent, input.conversation_context)
+        _messages = self._build_messages_from_context(input.conversation_context)
+        if isinstance(input.input_messages, list):
+            _messages.extend(input.input_messages)
+        else:
+            _messages.append(input.input_messages)
                 
-        _response: AgentRunResponse = await _agent.run(input.input_messages, thread=_thread, response_format=PlanningAgentResponseModel)
+        _response: AgentResponse = await _agent.run(
+            _messages,
+            options=OpenAIChatOptions(response_format={"type": "json_object"})
+        )
         
-        await ctx.yield_output(_response.value)
+        # Parse structured response
+        import json
+        try:
+            _parsed_value = PlanningAgentResponseModel.model_validate_json(_response.text)
+        except Exception:
+            _parsed_value = PlanningAgentResponseModel(name="Unknown", description="", steps=[], message=_response.text)
+        
+        await ctx.yield_output(_parsed_value)
         
         _output = ExecutionPlan(
             agent_id=_agent.id,
             analysis=input.analysis,
             input_messages=input.input_messages,
-            plan=_response.value
+            plan=_parsed_value
         )
         
         await ctx.send_message(_output)
@@ -169,27 +182,22 @@ class FinancialAgentExecutor(Executor):
         
         super().__init__(id=id)
     
-    async def create_agent(self, id: str, instructions: str) -> ChatAgent:
-        """Create and return a ChatAgent configured for the What-If Chat workflow"""
-        agent = ChatAgent(
-            chat_client=self.chat_client,
+    async def create_agent(self, id: str, instructions: str) -> Agent:
+        """Create and return an Agent configured for the What-If Chat workflow"""
+        agent = Agent(
+            client=self.chat_client,
             instructions=instructions,
             id=id,
             name=id
         )
         return agent
     
-    async def create_thread_from_context(self, agent: ChatAgent, ctx: WorkflowContext[Any, Any]) -> AgentThread:
-        """Create an AgentThread from the workflow context"""
-        thread = agent.get_new_thread()
-        if not await ctx.shared_state.has("conversation_context"):
-            return thread
-        
-        conversation_context: ConversationContext = await ctx.get_shared_state(key="conversation_context")
+    def _build_messages_from_context(self, ctx: WorkflowContext[Any, Any], conversation_context: ConversationContext) -> list[Message]:
+        """Build a list of Messages from the workflow context"""
+        messages = []
         if conversation_context is not None and conversation_context.message_history is not None:
-            for msg in conversation_context.message_history:
-                await thread.on_new_messages(msg)
-        return thread
+            messages.extend(conversation_context.message_history)
+        return messages
     
     @handler
     async def handle(self, input: ExecutionPlan, ctx: WorkflowContext[AnalystAgentOutput, str]) -> Any:
@@ -220,18 +228,7 @@ class FinancialAgentExecutor(Executor):
                 """
             )
             
-            _thread = await self.create_thread_from_context(_agent, ctx)
-            
-            # _all_response_updates: list[AgentRunResponseUpdate] = []
-            # async for event in _agent.run_stream(messages=step.task, thread=_thread):
-            #     if isinstance(event, AgentRunResponseUpdate):
-            #         _response_delta = event.text
-            #         _all_response_updates.append(event)
-            #         await ctx.yield_output(_response_delta)
-                    
-            # _response: AgentRunResponse = AgentRunResponse.from_agent_run_response_updates(_all_response_updates)
-            
-            _response: AgentRunResponse = await _agent.run(messages=step.task, thread=_thread)
+            _response: AgentResponse = await _agent.run(messages=step.task)
             
             await ctx.yield_output(_response.text)
             
@@ -253,27 +250,15 @@ class RiskAgentExecutor(Executor):
         
         super().__init__(id=id)
     
-    async def create_agent(self, id: str, instructions: str) -> ChatAgent:
-        """Create and return a ChatAgent configured for the What-If Chat workflow"""
-        agent = ChatAgent(
-            chat_client=self.chat_client,
+    async def create_agent(self, id: str, instructions: str) -> Agent:
+        """Create and return an Agent configured for the What-If Chat workflow"""
+        agent = Agent(
+            client=self.chat_client,
             instructions=instructions,
             id=id,
             name=id
         )
         return agent
-    
-    async def create_thread_from_context(self, agent: ChatAgent, ctx: WorkflowContext[Any, Any]) -> AgentThread:
-        """Create an AgentThread from the workflow context"""
-        thread = agent.get_new_thread()
-        if not await ctx.shared_state.has("conversation_context"):
-            return thread
-        
-        conversation_context: ConversationContext = await ctx.get_shared_state(key="conversation_context")
-        if conversation_context is not None and conversation_context.message_history is not None:
-            for msg in conversation_context.message_history:
-                await thread.on_new_messages(msg)
-        return thread
     
     @handler
     async def handle(self, input: ExecutionPlan, ctx: WorkflowContext[AnalystAgentOutput, str]) -> Any:
@@ -302,8 +287,7 @@ class RiskAgentExecutor(Executor):
                 """
             )
             
-            _thread = await self.create_thread_from_context(_agent, ctx)
-            _response: AgentRunResponse = await _agent.run(messages=step.task, thread=_thread)
+            _response: AgentResponse = await _agent.run(messages=step.task)
             
             await ctx.yield_output(_response.text)
             
@@ -324,27 +308,15 @@ class MarketAgentExecutor(Executor):
         
         super().__init__(id=id)
     
-    async def create_agent(self, id: str, instructions: str) -> ChatAgent:
-        """Create and return a ChatAgent configured for the What-If Chat workflow"""
-        agent = ChatAgent(
-            chat_client=self.chat_client,
+    async def create_agent(self, id: str, instructions: str) -> Agent:
+        """Create and return an Agent configured for the What-If Chat workflow"""
+        agent = Agent(
+            client=self.chat_client,
             instructions=instructions,
             id=id,
             name=id
         )
         return agent
-    
-    async def create_thread_from_context(self, agent: ChatAgent, ctx: WorkflowContext[Any, Any]) -> AgentThread:
-        """Create an AgentThread from the workflow context"""
-        thread = agent.get_new_thread()
-        if not await ctx.shared_state.has("conversation_context"):
-            return thread
-        
-        conversation_context: ConversationContext = await ctx.get_shared_state(key="conversation_context")
-        if conversation_context is not None and conversation_context.message_history is not None:
-            for msg in conversation_context.message_history:
-                await thread.on_new_messages(msg)
-        return thread
     
     @handler
     async def handle(self, input: ExecutionPlan, ctx: WorkflowContext[AnalystAgentOutput, str]) -> Any:
@@ -373,8 +345,7 @@ class MarketAgentExecutor(Executor):
                 """
             )
             
-            _thread = await self.create_thread_from_context(_agent, ctx)
-            _response: AgentRunResponse = await _agent.run(messages=step.task, thread=_thread)
+            _response: AgentResponse = await _agent.run(messages=step.task)
             
             await ctx.yield_output(_response.text)
             
@@ -392,27 +363,15 @@ class ComplianceAgentExecutor(Executor):
         
         super().__init__(id=id)
     
-    async def create_agent(self, id: str, instructions: str) -> ChatAgent:
-        """Create and return a ChatAgent configured for the What-If Chat workflow"""
-        agent = ChatAgent(
-            chat_client=self.chat_client,
+    async def create_agent(self, id: str, instructions: str) -> Agent:
+        """Create and return an Agent configured for the What-If Chat workflow"""
+        agent = Agent(
+            client=self.chat_client,
             instructions=instructions,
             id=id,
             name=id
         )
         return agent
-    
-    async def create_thread_from_context(self, agent: ChatAgent, ctx: WorkflowContext[Any, Any]) -> AgentThread:
-        """Create an AgentThread from the workflow context"""
-        thread = agent.get_new_thread()
-        if not await ctx.shared_state.has("conversation_context"):
-            return thread
-        
-        conversation_context: ConversationContext = await ctx.get_shared_state(key="conversation_context")
-        if conversation_context is not None and conversation_context.message_history is not None:
-            for msg in conversation_context.message_history:
-                await thread.on_new_messages(msg)
-        return thread
     
     @handler
     async def handle(self, input: ExecutionPlan, ctx: WorkflowContext[AnalystAgentOutput, str]) -> Any:
@@ -441,8 +400,7 @@ class ComplianceAgentExecutor(Executor):
                 """
             )
             
-            _thread = await self.create_thread_from_context(_agent, ctx)
-            _response: AgentRunResponse = await _agent.run(messages=step.task, thread=_thread)
+            _response: AgentResponse = await _agent.run(messages=step.task)
             
             await ctx.yield_output(_response.text)
             
@@ -462,10 +420,10 @@ class AnalysisSummarizer(Executor):
         self._expert_ids = expert_ids
         self.chat_client = chat_client
 
-    async def create_agent(self, id: str, instructions: str) -> ChatAgent:
-        """Create and return a ChatAgent configured for the What-If Chat workflow"""
-        agent = ChatAgent(
-            chat_client=self.chat_client,
+    async def create_agent(self, id: str, instructions: str) -> Agent:
+        """Create and return an Agent configured for the What-If Chat workflow"""
+        agent = Agent(
+            client=self.chat_client,
             instructions=instructions,
             id=id,
             name=id
@@ -502,7 +460,7 @@ class AnalysisSummarizer(Executor):
         agent_responses = [f"{result.agent_id}: {result.response.text}" for result in analyst_outputs]
         combined_analysis = "\n\n".join(agent_responses)
         
-        _response: AgentRunResponse = await _agent.run(combined_analysis)
+        _response: AgentResponse = await _agent.run(combined_analysis)
         
         await ctx.yield_output(_response.text)
        

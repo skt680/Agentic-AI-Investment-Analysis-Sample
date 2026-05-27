@@ -9,7 +9,7 @@ azure-storage-blob==12.26.0
 azure-cosmos==4.9.0
 
 # Microsoft Agent Framework
-agent-framework
+agent-framework==1.6.0
 
 # Authentication & Security
 # python-jose[cryptography]==3.3.0

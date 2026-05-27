@@ -5,9 +5,8 @@ from collections.abc import Collection
 from typing import Any
 import uuid
 
-from agent_framework import AgentThread, ChatMessage, ChatMessageStoreProtocol
-from agent_framework._threads import ChatMessageStoreState
-from agent_framework import BaseChatClient, ChatAgent, Workflow, WorkflowBuilder
+from agent_framework import AgentSession, Message
+from agent_framework import BaseChatClient, Agent, Workflow, WorkflowBuilder
 
 from app.database.repositories import WhatIfMessageRepository
 from app.models import Analysis

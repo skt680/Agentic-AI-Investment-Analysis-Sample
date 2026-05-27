@@ -5,16 +5,9 @@ Manages the execution of AI agents in the analysis workflow
 from typing import TYPE_CHECKING, Collection, List
 import logging
 
-from agent_framework import (ExecutorInvokedEvent, 
-                             ExecutorCompletedEvent, 
-                             ExecutorFailedEvent, 
-                             WorkflowEvent, 
-                             WorkflowStartedEvent, 
-                             WorkflowRunState, 
-                             WorkflowFailedEvent, 
-                             WorkflowOutputEvent, 
-                             WorkflowStatusEvent,
-                             ChatMessage)
+from agent_framework import (WorkflowEvent, 
+                             WorkflowRunState,
+                             Message)
 
 from app.utils.sse_stream_event_queue import SSEStreamEventQueue
 from app.dependencies import get_chat_client
@@ -75,7 +68,7 @@ class WhatIfWorkflowExecutorService:
             history_messages = sorted(conversation.messages, key=lambda msg: msg.sequence_number)
             conversation_context = ConversationContext(
                 conversation_id=conversation_id,
-                message_history=[ChatMessage(role=msg.role, text=msg.text, author_name=msg.author) for msg in history_messages]
+                message_history=[Message(role=msg.role, contents=[msg.text], author_name=msg.author) for msg in history_messages]
             )
             
         return conversation_context
@@ -119,24 +112,22 @@ class WhatIfWorkflowExecutorService:
         data = {}
         message = None
         
-        if isinstance(event, WorkflowStartedEvent):
+        if event.type == "started":
             message_type = "workflow_started"
             message = "What If Workflow execution started"
-        elif isinstance(event, WorkflowFailedEvent):
+        elif event.type == "failed":
             message_type = "error"
             message = "What If Workflow execution failed"
-            executor = event.details.executor_id
+            executor = event.details.executor_id if event.details else None
             data = {"error": event.details.message, 
                     "error_type": event.details.error_type,
                     "traceback": event.details.traceback,
                     "extra": event.details.extra
-                    }
-            # fail the analysis in the database
-            # await self.analysis_service.fail_analysis(error_details=data)
+                    } if event.details else {}
 
-        elif isinstance(event, WorkflowStatusEvent):
+        elif event.type == "status":
             message_type = "workflow_status"
-            data = {"state": event.state.value}
+            data = {"state": event.state.value if hasattr(event.state, 'value') else str(event.state)}
             
             # update analysis status if completed
             if event.state == WorkflowRunState.IDLE:
@@ -148,25 +139,25 @@ class WhatIfWorkflowExecutorService:
             elif event.state == WorkflowRunState.IN_PROGRESS:
                 message = "What If Workflow is running"
                 
-        elif isinstance(event, ExecutorInvokedEvent):
+        elif event.type == "executor_invoked":
             message_type = "executor_invoked"
             executor = event.executor_id
             
-        elif isinstance(event, ExecutorCompletedEvent):
+        elif event.type == "executor_completed":
             message_type = "executor_completed"
             executor = event.executor_id
             data = event.data or {}
             
-        elif isinstance(event, WorkflowOutputEvent):
+        elif event.type == "output":
             message_type = "workflow_output"
-            executor = event.source_executor_id
+            executor = event.executor_id
             if executor == "planning_agent_executor":
                 message_type = "reasoning"
             else:
                 message_type = "markdown"
             data = event.data or {}
             
-        elif isinstance(event, ExecutorFailedEvent):
+        elif event.type == "executor_failed":
             message_type = "executor_failed"
             executor = event.executor_id
             data = {
@@ -174,7 +165,7 @@ class WhatIfWorkflowExecutorService:
                 "error_type": event.details.error_type,
                 "traceback": event.details.traceback,
                 "extra": event.details.extra
-            }
+            } if event.details else {}
         else:
             message_type = "unknown_event"
             
@@ -189,7 +180,7 @@ class WhatIfWorkflowExecutorService:
         )
         
         # save the message
-        if isinstance(event, WorkflowOutputEvent):
+        if event.type == "output":
             await self.try_persist_conversation_message(
                 conversation_id=conversation_id,
                 analysis_id=analysis_id,
@@ -245,7 +236,7 @@ class WhatIfWorkflowExecutorService:
             input = WhatIfChatWorkflowInputData(
                 analysis=analysis,
                 conversation_context=conversation_context,
-                input_messages=ChatMessage(role="user", text=input_message, author_name="User")
+                input_messages=Message(role="user", contents=[input_message], author_name="User")
             )
 
             # Run the workflow and handle events           

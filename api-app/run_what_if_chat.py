@@ -17,7 +17,7 @@ import traceback
 import sys
 from datetime import datetime
 
-from agent_framework import AgentRunResponseUpdate, ChatMessage, WorkflowOutputEvent
+from agent_framework import AgentResponseUpdate, Message, WorkflowEvent
 
 from app.what_if_chat import WhatIfChatWorkflow, WhatIfChatWorkflowInputData, ConversationContext
 from app.dependencies import get_chat_client, get_cosmos_client, initialize_all, close_all
@@ -57,9 +57,9 @@ async def test_single_conversation(workflow: WhatIfChatWorkflow, conversation_id
                     print(f"\n   📊 Result #{idx}")
                     print(f"      {result}")
             
-            elif isinstance(event, WorkflowOutputEvent):
+            elif event.type == "output":
                 # Track which agent is currently responding
-                current_agent = event.source_executor_id
+                current_agent = event.executor_id
                 print(f"\n   🤖 Agent '{current_agent}' responded:")
                 print(f"      {event.data}")    
             

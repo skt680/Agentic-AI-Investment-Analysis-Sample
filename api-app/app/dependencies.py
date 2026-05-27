@@ -87,12 +87,12 @@ async def close_sse_event_queue_for_session(session_id: str):
         del _sse_event_queue_sessions[session_id]
 
 async def get_chat_client() -> BaseChatClient:
-    """Dependency to get AzureOpenAIChatClient"""
-    from agent_framework.azure import AzureOpenAIChatClient
+    """Dependency to get OpenAIChatClient configured for Azure"""
+    from agent_framework.openai import OpenAIChatClient
     credential = get_azure_credential()
-    return AzureOpenAIChatClient(endpoint=settings.AZURE_OPENAI_ENDPOINT,
-                                 deployment_name=settings.AZURE_OPENAI_DEPLOYMENT_NAME,
-                                 credential=credential)
+    return OpenAIChatClient(model=settings.AZURE_OPENAI_DEPLOYMENT_NAME,
+                            azure_endpoint=settings.AZURE_OPENAI_ENDPOINT,
+                            credential=credential)
 
 async def initialize_all():
     """Initialize all dependencies"""
