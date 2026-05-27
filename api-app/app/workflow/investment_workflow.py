@@ -65,7 +65,7 @@ class InvestmentAnalysisWorkflow:
 
         logger.info(f"Running investment analysis workflow for analysis {analysis_run_input.analysis_id}")
 
-        async for event in self.workflow.run_stream(analysis_run_input):
+        async for event in self.workflow.run(message=analysis_run_input, stream=True):
             yield event
 
         logger.info(f"Workflow run completed for analysis {analysis_run_input.analysis_id}")

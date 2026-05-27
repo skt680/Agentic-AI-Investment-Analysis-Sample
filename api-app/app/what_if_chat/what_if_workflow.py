@@ -51,5 +51,5 @@ class WhatIfChatWorkflow:
             raise ValueError("Workflow not initialized. Call initialize_workflow() first.")
         
         logger.info(f"Running What-If Chat workflow")
-        async for event in self.workflow.run_stream(message=input):
+        async for event in self.workflow.run(message=input, stream=True):
             yield event
